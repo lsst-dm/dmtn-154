@@ -1,61 +1,91 @@
-..
-  Technote content.
-
-  See https://developer.lsst.io/restructuredtext/style.html
-  for a guide to reStructuredText writing.
-
-  Do not put the title, authors or other metadata in this document;
-  those are automatically added.
-
-  Use the following syntax for sections:
-
-  Sections
-  ========
-
-  and
-
-  Subsections
-  -----------
-
-  and
-
-  Subsubsections
-  ^^^^^^^^^^^^^^
-
-  To add images, add the image file (png, svg or jpeg preferred) to the
-  _static/ directory. The reST syntax for adding the image is
-
-  .. figure:: /_static/filename.ext
-     :name: fig-label
-
-     Caption text.
-
-   Run: ``make html`` and ``open _build/html/index.html`` to preview your work.
-   See the README at https://github.com/lsst-sqre/lsst-technote-bootstrap or
-   this repo's README for more info.
-
-   Feel free to delete this instructional comment.
-
 :tocdepth: 1
-
-.. Please do not modify tocdepth; will be fixed when a new Sphinx theme is shipped.
 
 .. sectnum::
 
-.. TODO: Delete the note below before merging new content to the master branch.
+Overview
+========
 
-.. note::
+Data Backbone (DBB) buffer managers are two separate pieces of software. The
+first being the **handoff manager** which is responsible for transferring files
+from a remote location (**handoff site**) to a designated location at the data
+facility, an **endpoint site**. The second piece of software is the **endpoint
+manager** which is responsible for ingesting files into different data
+management systems operating on the endpoint site, e.g., Gen2 and/or Gen3
+Butler repositories.
 
-   **This technote is not yet published.**
+Handoff manager
+===============
 
-   DBB buffer managers are responsible for transferring images to the LSST data facility and ingesting them to different management systems. This document describes their operational principles and architecture.
+The handoff buffer manager transfers files between two **buffers**. New image
+files are written to a storage location (handoff buffer)  by the Archiver
+process.  After successfully transferring the file to the endpoint buffer, the
+manager moves the file from original storage location to another directory, a
+**holding area**, thus managing what files have been transferred to the
+endpoint site.
 
-.. Add content here.
-.. Do not include the document title (it's automatically added from metadata.yaml).
+.. figure:: /_static/dataflow.svg
+   :width: 500px
+   :align: center
+   :name: Figure 1
 
-.. .. rubric:: References
+   Schematic representation of the data flow between handoff and endpoint
+   buffers.
 
-.. Make in-text citations with: :cite:`bibkey`.
+It is worth noting that:
 
-.. .. bibliography:: local.bib lsstbib/books.bib lsstbib/lsst.bib lsstbib/lsst-dm.bib lsstbib/refs.bib lsstbib/refs_ads.bib
-..    :style: lsst_aa
+#. The manager is a daemon-like process running continuously on the handoff
+   site.
+#. The manager considers each file in the handoff buffer to be a new file ready
+   for transfer. Hence, for the manager to operate correctly, writing files to
+   the handoff buffer must be an atomic operation.
+#. Similarly to rsync, the manager replicates the directory structure between
+   buffers. For example, the file in the handoff buffer located at
+   foo/bar/baz.fits  will be written to exactly the same location in the
+   endpoint buffer.
+#. The current transfer mechanism is ``scp``, so the handoff manager must first
+   transfer the file to a scratch staging area before atomically moving to the
+   endpoint buffer.
+
+Endpoint manager
+================
+
+The endpoint manager consists of two types of core components: **Finders** and
+**Ingesters**. They use a relational database management system (RDBMS) to
+provide useful information about files in the storage area and details
+regarding ingestion attempts that were made for each file.
+
+.. figure:: /_static/endmgr.svg
+   :width: 500px
+   :align: center
+   :name: Figure 2
+
+   Overview of the architecture of the endpoint buffer manager.  Solid arrows
+   indicate file movement between the buffer and the storage area, dashed
+   arrows show ingestion process (no file movement, only linking/copying), and
+   dotted lines show database updates.
+
+A Finder is responsible for discovering new files arriving at a specified
+location and moving them, if necessary, to their final destination, **storage
+area**. While doing so it populates the database table that acts as a single
+source of truth with regard to the content of the storage area. Each Finder
+monitors a single location, but multiple Finders can be deployed on a given
+endpoint site, each monitoring a different location.
+
+An Ingester is responsible for making ingest attempts to a data management
+system on the endpoint site.  Similarly to Finders, multiple Ingesters can be
+deployed on a given endpoint site to ingest images to different database
+management systems (e.g., Gen2 and  Gen3 Butler repositories).
+
+Each Ingester stores in the RDBMS a complete history of events for each file
+allowing monitoring systems (or interested parties)to quickly find out
+information including, but not limited to:
+
+* at files are currently ingested,
+* which ingests attempts succeeded or failed,
+* when an attempt was made,
+* how long it took to ingest a file.
+
+Finders and Ingesters operate independently hence catastrophic failure in one
+of the components will not propagate to others taking the entire DBB endpoint
+manager offline. It also means that they can be maintained and/or upgraded at
+different cadences.
